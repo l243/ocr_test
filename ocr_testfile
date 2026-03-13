@@ -1,0 +1,76 @@
+import pytesseract
+from pdf2image import convert_from_path
+import cv2
+import numpy as np
+import os, shutil
+# import time
+
+def get_ocr_result(file, search_param):
+    # st = time.time()
+    
+    # This, or you can do a loop to delete files one by one
+    if os.path.exists(r"resources\image_results"):
+        shutil.rmtree(r"resources\image_results")
+
+    search_array = []
+    os.mkdir(r"resources\image_results") # Remove this if you created a loop to delete files one by one
+
+    # Ensure that the path for your file is correct
+    # poppler_path needed since we can't put env variable to user PCs
+    pages = convert_from_path(file, 300, poppler_path=r"resources\poppler\Library\bin")
+
+    # Iterate through every page
+    for i, page in enumerate(pages):
+        
+        # Convert the image to grayscale and apply thresholding
+        # image = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2GRAY)
+        image2 = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2RGBA) # Prep image for the image overlay. Used to highlight the search keywords.
+        # _, image = cv2.threshold(image, 100, 255, cv2.THRESH_BINARY) # Used gradient 100 because it yielded slightly better results than 127 in the tested op reports
+        overlay = image2.copy() # Copy the current image so we can draw in it. You can skip if you are using grayscaled image.
+
+        # This is comparably quicker than using colored images only. Saves 1-2 seconds per page.
+        image = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2GRAY)
+        _, image = cv2.threshold(image, 100, 255, cv2.THRESH_BINARY) # Used gradient 100 because it yielded slightly better results than 127 in the tested op reports. Feel free to change.
+        
+        # Perform OCR on image using pytesseract. 
+        # The --psm 6 flag tells pytesseract to do it line by line
+        # Page segmentation modes:
+        # 0    Orientation and script detection (OSD) only.
+        # 1    Automatic page segmentation with OSD.
+        # 2    Automatic page segmentation, but no OSD, or OCR. (not implemented)
+        # 3    Fully automatic page segmentation, but no OSD. (Default)
+        # 4    Assume a single column of text of variable sizes.
+        # 5    Assume a single uniform block of vertically aligned text.
+        # 6    Assume a single uniform block of text.
+        # 7    Treat the image as a single text line.
+        # 8    Treat the image as a single word.
+        # 9    Treat the image as a single word in a circle.
+        # 10    Treat the image as a single character.
+        # 11    Sparse text. Find as much text as possible in no particular order.
+        # 12    Sparse text with OSD.
+        # 13    Raw line. Treat the image as a single text line,
+        #     bypassing hacks that are Tesseract-specific.
+
+        pytesseract.pytesseract.tesseract_cmd = r"resources\tesseract\tesseract.exe" # Same reason with poppler, can't have tesseract installed in every user PC
+        # data = pytesseract.image_to_data(image, config="--oem 3 --psm 6", output_type="dict") # This reads the entire line
+        data = pytesseract.image_to_data(image, output_type="dict") # This allows reading the individual words/characters
+        search_array.append(data)
+        data_boxes = len(data["level"])
+
+        if not search_param == "":
+            for j in range(data_boxes):
+                # Draw bounding boxes for the lines detected in that image
+                for text in " ".join(search_param.split()).split(" "):
+                    if text.lower() in data["text"][j].lower():
+                        (x, y, w, h) = (data["left"][j], data["top"][j], data["width"][j], data["height"][j])
+                        cv2.rectangle(overlay, (x, y), (x + w, y + h), (0, 255, 255), -1)
+                        # Change last param from -1 to 2 if you are using grayscaled image
+
+        alpha = 0.6
+        opaqued_img = cv2.addWeighted(overlay, alpha, image2, 1-alpha, 0) # Apply opacity in the bounding rectangle. Only use in colored image.
+        resized_img = cv2.resize(opaqued_img, (0, 0), fx=0.5, fy=0.5) # Change opaqued_img to image if using grayscaled image
+        curr_page = i + 1
+        cv2.imwrite(f"resources\image_results\page_{curr_page}.jpg", resized_img)
+
+    # et = time.time()
+    # print(f"{et - st:.3f}")
