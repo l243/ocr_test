@@ -1,0 +1,76 @@
+from PyQt5 import QtWidgets, QtCore, QtGui
+
+class DpiManager(QtCore.QObject):
+    BASE_DPI = 96.0
+
+    def __init__(self, window: QtWidgets.QMainWindow):
+        super().__init__(window)
+        self.window = window
+        self.current_scale = 1.0
+
+        # Delay until windowHandle exists
+        QtCore.QTimer.singleShot(0, self._init)
+
+    def _init(self):
+        handle = self.window.windowHandle()
+        if handle:
+            handle.screenChanged.connect(self.apply_for_screen)
+            self.apply_for_screen(handle.screen())
+
+    def scale(self, value):
+        return int(value * self.current_scale)
+
+    def apply_for_screen(self, screen: QtGui.QScreen):
+        if not screen:
+            return
+
+        dpi = screen.logicalDotsPerInch()
+        self.current_scale = dpi / self.BASE_DPI
+
+        self._apply_global_font()
+        self._walk_widgets(self.window)
+
+    # ---------- Core scaling ----------
+
+    def _apply_global_font(self):
+        font = self.window.font()
+        font.setPointSizeF(10 * self.current_scale)
+        self.window.setFont(font)
+
+    def _walk_widgets(self, parent):
+        for w in parent.findChildren(QtWidgets.QWidget):
+            self._scale_widget(w)
+
+    def _scale_widget(self, w: QtWidgets.QWidget):
+        # Layouts
+        layout = w.layout()
+        if layout:
+            layout.setSpacing(self.scale(8))
+            layout.setContentsMargins(
+                self.scale(10), self.scale(10),
+                self.scale(10), self.scale(10)
+            )
+
+        # Buttons / inputs
+        if isinstance(w, (QtWidgets.QPushButton, QtWidgets.QLineEdit,
+                          QtWidgets.QComboBox, QtWidgets.QSpinBox)):
+            w.setMinimumHeight(self.scale(28))
+
+        # Labels
+        if isinstance(w, QtWidgets.QLabel):
+            w.setWordWrap(True)
+
+        # Tables
+        if isinstance(w, (QtWidgets.QTableWidget, QtWidgets.QTableView)):
+            vh = w.verticalHeader()
+            hh = w.horizontalHeader()
+
+            vh.setDefaultSectionSize(self.scale(24))
+            hh.setDefaultSectionSize(self.scale(100))
+
+            w.resizeRowsToContents()
+            w.resizeColumnsToContents()
+
+        # Icons
+        if hasattr(w, "setIconSize"):
+            w.setIconSize(QtCore.QSize(self.scale(16), self.scale(16)))
