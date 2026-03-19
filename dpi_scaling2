@@ -1,0 +1,38 @@
+class ScalableMainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.old_dpi = self.screen().logicalDotsPerInch()
+
+    def resizeEvent(self, event):
+        # Optional: handle window resizing if needed
+        super().resizeEvent(event)
+
+    def moveEvent(self, event):
+        # Check for screen change and adjust scale
+        current_screen = self.screen()
+        if current_screen:
+            current_dpi = current_screen.logicalDotsPerInch()
+            if current_dpi != self.old_dpi:
+                scale_factor = current_dpi / self.old_dpi
+                self.scale_widgets(self, scale_factor)
+                self.old_dpi = current_dpi
+        super().moveEvent(event)
+
+    def scale_widgets(self, widget, factor):
+        """Recursively scale widget and its children."""
+        # Scale geometry
+        geom = widget.geometry()
+        geom.setWidth(int(geom.width() * factor))
+        geom.setHeight(int(geom.height() * factor))
+        geom.setX(int(geom.x() * factor))
+        geom.setY(int(geom.y() * factor))
+        widget.setGeometry(geom)
+
+        # Scale font
+        font = widget.font()
+        font.setPointSizeF(font.pointSizeF() * factor)
+        widget.setFont(font)
+
+        # Recursively scale children
+        for child in widget.findChildren(QWidget):
+            self.scale_widgets(child, factor)
