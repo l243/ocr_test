@@ -1,0 +1,218 @@
+import os
+import re
+import cv2
+import numpy as np
+import pytesseract
+import hashlib
+import pickle
+import shutil
+import time
+import gc
+import configparser
+
+from pdf2image import convert_from_bytes, pdfinfo_from_bytes
+
+# =========================
+# CONFIG
+# =========================
+
+BASE_CACHE_DIR = r"resources\cache"
+OUTPUT_DIR = r"resources\image_results"
+POPPLER_PATH = r"resources\poppler\Library\bin"
+TESSERACT_PATH = r"resources\tesseract\tesseract.exe"
+
+pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+
+config = configparser.ConfigParser()
+config.read("config.ini")
+
+OCR_DPI = int(config["BRAT_CONFIG"]["ocr_dpi"])
+THRESH = int(config["BRAT_CONFIG"]["gradient"])
+JPEG_QUALITY = 50
+
+
+# =========================
+# UTILITIES
+# =========================
+
+def get_pdf_hash(file_path):
+    with open(file_path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
+
+
+def get_cache_paths(pdf_hash):
+    base = os.path.join(BASE_CACHE_DIR, pdf_hash)
+    return {
+        "base": base,
+        "images": os.path.join(base, "images"),
+        "ocr": os.path.join(base, "ocr"),
+    }
+
+
+def ensure_dirs(paths):
+    os.makedirs(paths["images"], exist_ok=True)
+    os.makedirs(paths["ocr"], exist_ok=True)
+
+
+def get_total_pages(pdf_bytes):
+    info = pdfinfo_from_bytes(pdf_bytes, poppler_path=POPPLER_PATH)
+    return info["Pages"]
+
+
+def clear_output():
+    if os.path.exists(OUTPUT_DIR):
+        shutil.rmtree(OUTPUT_DIR)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+# =========================
+# PHASE 1: BUILD CACHE (RUN ONCE PER PDF)
+# =========================
+
+def build_cache(file_path, resize=0.5):
+    """
+    Generates:
+    - page images
+    - OCR per page
+    """
+
+    pdf_hash = get_pdf_hash(file_path)
+    paths = get_cache_paths(pdf_hash)
+    ensure_dirs(paths)
+
+    with open(file_path, "rb") as f:
+        pdf_bytes = f.read()
+
+    pages = convert_from_bytes(
+        pdf_bytes,
+        dpi=OCR_DPI,
+        poppler_path=POPPLER_PATH
+    )
+
+    for i, page in enumerate(pages):
+        img = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2BGR)
+        resized = cv2.resize(img, (0, 0), fx=resize, fy=resize)
+
+        img_path = os.path.join(paths["images"], f"page_{i:03d}.jpg")
+        ocr_path = os.path.join(paths["ocr"], f"page_{i:03d}.pkl")
+
+        # save image
+        cv2.imwrite(img_path, resized, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+
+        # OCR
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        _, thresh_img = cv2.threshold(gray, THRESH, 255, cv2.THRESH_BINARY)
+
+        raw = pytesseract.image_to_data(
+            thresh_img,
+            config="--oem 3 --psm 11",
+            output_type=pytesseract.Output.DICT
+        )
+
+        words = raw["text"]
+        full_text = " ".join([w.lower() for w in words if w.strip()])
+
+        data = {
+            "text": words,
+            "left": raw["left"],
+            "top": raw["top"],
+            "width": raw["width"],
+            "height": raw["height"],
+            "full_text": full_text
+        }
+
+        with open(ocr_path, "wb") as f:
+            pickle.dump(data, f)
+
+        del page, img, raw
+        gc.collect()
+
+
+# =========================
+# PHASE 2: SEARCH + RENDER (MEDICAL VIEW MODE)
+# =========================
+
+def get_ocr_result(file_path, search_param=None):
+    """
+    Always renders ALL pages.
+    Only applies highlighting if search_param exists.
+    """
+
+    start = time.time()
+
+    pdf_hash = get_pdf_hash(file_path)
+    paths = get_cache_paths(pdf_hash)
+
+    clear_output()
+
+    with open(file_path, "rb") as f:
+        pdf_bytes = f.read()
+
+    total_pages = get_total_pages(pdf_bytes)
+
+    print(f"[RENDER] Total pages: {total_pages}")
+
+    pattern = None
+    keywords = []
+
+    if search_param:
+        keywords = search_param.lower().split()
+        pattern = re.compile("|".join(map(re.escape, keywords)))
+
+    for i in range(total_pages):
+        img_path = os.path.join(paths["images"], f"page_{i:03d}.jpg")
+        ocr_path = os.path.join(paths["ocr"], f"page_{i:03d}.pkl")
+
+        if not os.path.exists(img_path) or not os.path.exists(ocr_path):
+            continue
+
+        image = cv2.imread(img_path)
+        overlay = image.copy()
+
+        with open(ocr_path, "rb") as f:
+            data = pickle.load(f)
+
+        found = False
+
+        if pattern:
+            for j, word in enumerate(data["text"]):
+                w = word.lower().strip()
+
+                if not w:
+                    continue
+
+                if pattern.search(w):
+                    x = data["left"][j]
+                    y = data["top"][j]
+                    w_box = data["width"][j]
+                    h_box = data["height"][j]
+
+                    cv2.rectangle(
+                        overlay,
+                        (x, y),
+                        (x + w_box, y + h_box),
+                        (0, 255, 255),
+                        -1
+                    )
+                    found = True
+
+        # blend overlay
+        result = cv2.addWeighted(overlay, 0.35, image, 0.65, 0)
+
+        cv2.imwrite(
+            os.path.join(OUTPUT_DIR, f"page_{i:03d}.jpg"),
+            result,
+            [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+        )
+
+        del image, overlay, data
+
+    print(f"Done in {time.time() - start:.2f}s")
+
+
+# =========================
+# ENTRY POINT
+# =========================
+
+if __name__ == "__main__":
+    print("OCR system ready")
