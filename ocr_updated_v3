@@ -69,13 +69,7 @@ def clear_output():
 # PHASE 1: BUILD CACHE (RUN ONCE PER PDF)
 # =========================
 
-def build_cache(file_path, resize=0.5):
-    """
-    Generates:
-    - page images
-    - OCR per page
-    """
-
+def build_cache(file_path, resize=0.5, batch_size=10):
     pdf_hash = get_pdf_hash(file_path)
     paths = get_cache_paths(pdf_hash)
     ensure_dirs(paths)
@@ -83,50 +77,61 @@ def build_cache(file_path, resize=0.5):
     with open(file_path, "rb") as f:
         pdf_bytes = f.read()
 
-    pages = convert_from_bytes(
-        pdf_bytes,
-        dpi=OCR_DPI,
-        poppler_path=POPPLER_PATH
-    )
+    total_pages = get_total_pages(pdf_bytes)
+    print(f"[CACHE BUILD] Total pages: {total_pages}")
 
-    for i, page in enumerate(pages):
-        img = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2BGR)
-        resized = cv2.resize(img, (0, 0), fx=resize, fy=resize)
+    for start in range(0, total_pages, batch_size):
+        end = min(start + batch_size, total_pages)
 
-        img_path = os.path.join(paths["images"], f"page_{i:03d}.jpg")
-        ocr_path = os.path.join(paths["ocr"], f"page_{i:03d}.pkl")
+        print(f"Processing pages {start+1} to {end}")
 
-        # save image
-        cv2.imwrite(img_path, resized, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-
-        # OCR
-        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-        _, thresh_img = cv2.threshold(gray, THRESH, 255, cv2.THRESH_BINARY)
-
-        raw = pytesseract.image_to_data(
-            thresh_img,
-            config="--oem 3 --psm 11",
-            output_type=pytesseract.Output.DICT
+        pages = convert_from_bytes(
+            pdf_bytes,
+            dpi=OCR_DPI,
+            first_page=start + 1,
+            last_page=end,
+            poppler_path=POPPLER_PATH
         )
 
-        words = raw["text"]
-        full_text = " ".join([w.lower() for w in words if w.strip()])
+        for i, page in enumerate(pages):
+            page_index = start + i
 
-        data = {
-            "text": words,
-            "left": raw["left"],
-            "top": raw["top"],
-            "width": raw["width"],
-            "height": raw["height"],
-            "full_text": full_text
-        }
+            img_path = os.path.join(paths["images"], f"page_{page_index:03d}.jpg")
+            ocr_path = os.path.join(paths["ocr"], f"page_{page_index:03d}.pkl")
 
-        with open(ocr_path, "wb") as f:
-            pickle.dump(data, f)
+            # Skip if already cached
+            if os.path.exists(img_path) and os.path.exists(ocr_path):
+                continue
 
-        del page, img, raw
+            img = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2BGR)
+            resized = cv2.resize(img, (0, 0), fx=resize, fy=resize)
+
+            cv2.imwrite(img_path, resized, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+
+            gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+            _, thresh_img = cv2.threshold(gray, THRESH, 255, cv2.THRESH_BINARY)
+
+            raw = pytesseract.image_to_data(
+                thresh_img,
+                config="--oem 3 --psm 11",
+                output_type=pytesseract.Output.DICT
+            )
+
+            data = {
+                "text": raw["text"],
+                "left": raw["left"],
+                "top": raw["top"],
+                "width": raw["width"],
+                "height": raw["height"],
+                "full_text": " ".join([w.lower() for w in raw["text"] if w.strip()])
+            }
+
+            with open(ocr_path, "wb") as f:
+                pickle.dump(data, f)
+
+        # 🔥 CRITICAL: free memory
+        del pages
         gc.collect()
-
 
 # =========================
 # PHASE 2: SEARCH + RENDER (MEDICAL VIEW MODE)
